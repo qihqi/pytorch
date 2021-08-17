@@ -478,9 +478,9 @@ TEST(Simplify, HashLargeExpression) {
   HashProvider hasher;
   auto hash_r = hasher.hash(if_stmt);
   // We should not have to do any more work.
-  ASSERT_TRUE(hasher.cachedHash(memcpy_stmt));
+  ASSERT_TRUE(hasher.cachedHash(memcpy_stmt.get()));
   auto hash_t = hasher.hash(memcpy_stmt);
-  ASSERT_TRUE(hasher.cachedHash(store_ramp_stmt));
+  ASSERT_TRUE(hasher.cachedHash(store_ramp_stmt.get()));
   auto hash_f = hasher.hash(store_ramp_stmt);
 
   // Root not equal to either branch, and branches not equal.
@@ -3401,7 +3401,7 @@ TEST(Simplify, SimplifyConstantCond) {
     StmtPtr true_val = Store::make(a, {0}, 1);
     StmtPtr false_val = Store::make(b, {0}, 1);
 
-    CondPtr body = alloc<Cond>(condition.node(), true_val, false_val);
+    CondPtr body = Cond::make(condition.node(), true_val, false_val);
     StmtPtr simplified = IRSimplifier::simplify(body);
     BlockPtr block = to<Block>(simplified);
     IS_NODE_WITH_NAME(Store, block->front(), store);
@@ -3417,7 +3417,7 @@ TEST(Simplify, SimplifyConstantCond) {
     StmtPtr true_val = Store::make(a, {0}, 1);
     StmtPtr false_val = Store::make(b, {0}, 1);
 
-    StmtPtr body = alloc<Cond>(condition.node(), true_val, false_val);
+    StmtPtr body = Cond::make(condition.node(), true_val, false_val);
     StmtPtr simplified = IRSimplifier::simplify(body);
     BlockPtr block = to<Block>(simplified);
     IS_NODE_WITH_NAME(Store, block->front(), store);
@@ -3434,7 +3434,7 @@ TEST(Simplify, SimplifyConstantCond) {
     StmtPtr true_val = Store::make(a, {0}, 1);
     StmtPtr false_val = Store::make(b, {0}, 1);
 
-    StmtPtr body = alloc<Cond>(condition.node(), true_val, false_val);
+    StmtPtr body = Cond::make(condition.node(), true_val, false_val);
     StmtPtr simplified = IRSimplifier::simplify(body);
     BlockPtr block = to<Block>(simplified);
     IS_NODE_WITH_NAME(Store, block->front(), store);
@@ -3450,7 +3450,7 @@ TEST(Simplify, SimplifyConstantCond) {
     StmtPtr true_val = Store::make(a, {0}, x);
     StmtPtr false_val = Store::make(a, {0}, x);
 
-    StmtPtr body = alloc<Cond>(condition.node(), true_val, false_val);
+    StmtPtr body = Cond::make(condition.node(), true_val, false_val);
     StmtPtr simplified = IRSimplifier::simplify(body);
     BlockPtr block = to<Block>(simplified);
     IS_NODE_WITH_NAME(Store, block->front(), store);
@@ -3466,7 +3466,7 @@ TEST(Simplify, SimplifyConstantCond) {
     StmtPtr true_val = Store::make(a, {0}, ExprHandle(2) * x);
     StmtPtr false_val = Store::make(a, {0}, x + x);
 
-    StmtPtr body = alloc<Cond>(condition.node(), true_val, false_val);
+    StmtPtr body = Cond::make(condition.node(), true_val, false_val);
     StmtPtr simplified = IRSimplifier::simplify(body);
     BlockPtr block = to<Block>(simplified);
     IS_NODE_WITH_NAME(Store, block->front(), store);
@@ -3482,26 +3482,24 @@ TEST(Simplify, SimplifyConstantCond) {
     StmtPtr true_val = Store::make(a, {0}, x);
     StmtPtr false_val = Store::make(a, {0}, ExprHandle(2) * x);
 
-    StmtPtr body = alloc<Cond>(condition.node(), true_val, false_val);
+    StmtPtr body = Cond::make(condition.node(), true_val, false_val);
     StmtPtr simplified = IRSimplifier::simplify(body);
     BlockPtr block = to<Block>(simplified);
     ASSERT_EQ(block, nullptr);
   }
 
   {
-    StmtPtr cond = alloc<Cond>(
+    StmtPtr cond = Cond::make(
         ExprHandle(false).node(),
-        alloc<Block>(std::vector<StmtPtr>({})),
+        Block::make(std::vector<StmtPtr>({})),
         nullptr);
     StmtPtr simplified = IRSimplifier::simplify(cond);
     ASSERT_EQ(simplified, nullptr);
   }
 
   {
-    StmtPtr cond = alloc<Cond>(
-        ExprHandle(true).node(),
-        nullptr,
-        alloc<Block>(std::vector<StmtPtr>({})));
+    StmtPtr cond =
+        Cond::make(ExprHandle(true).node(), nullptr, Block::make({}));
     StmtPtr simplified = IRSimplifier::simplify(cond);
     ASSERT_EQ(simplified, nullptr);
   }
@@ -3513,9 +3511,9 @@ TEST(Simplify, SimplifyEliminateEmptyCond) {
   {
     VarHandle x("x", kInt);
     ExprHandle condition(x);
-    StmtPtr true_val = alloc<Block>(std::vector<StmtPtr>({}));
+    StmtPtr true_val = Block::make({});
 
-    StmtPtr body = alloc<Cond>(condition.node(), true_val, nullptr);
+    StmtPtr body = Cond::make(condition, true_val, nullptr);
     StmtPtr simplified = IRSimplifier::simplify(body);
     BlockPtr block = to<Block>(simplified);
     ASSERT_NE(block, nullptr);
@@ -3525,9 +3523,9 @@ TEST(Simplify, SimplifyEliminateEmptyCond) {
   {
     VarHandle x("x", kInt);
     ExprHandle condition(x);
-    StmtPtr false_val = alloc<Block>(std::vector<StmtPtr>({}));
+    StmtPtr false_val = Block::make({});
 
-    StmtPtr body = alloc<Cond>(condition.node(), nullptr, false_val);
+    StmtPtr body = Cond::make(condition, nullptr, false_val);
     StmtPtr simplified = IRSimplifier::simplify(body);
     BlockPtr block = to<Block>(simplified);
     ASSERT_NE(block, nullptr);
@@ -3961,7 +3959,7 @@ TEST(Simplify, SimplifyEliminateEmptyFor) {
 
   {
     // Flatten many layers around an empty block to an empty block.
-    StmtPtr last = alloc<Block>(std::vector<StmtPtr>({}));
+    StmtPtr last = Block::make({});
     for (int i = 0; i < 11; ++i) {
       VarHandle loopVar("loopVar", kInt);
       last = For::make(loopVar, 0, 10, last);
@@ -3983,10 +3981,10 @@ TEST(Simplify, SimplifyFlattenBlock) {
     StorePtr store1 = Store::make(a, {0}, 1);
     StorePtr store2 = Store::make(a, {0}, 0);
 
-    BlockPtr block1 = alloc<Block>(std::vector<StmtPtr>({store1, store2}));
-    BlockPtr block2 = alloc<Block>(std::vector<StmtPtr>({block1}));
+    BlockPtr block1 = Block::make({store1, store2});
+    BlockPtr block2 = Block::make({block1});
 
-    BlockPtr enclosing = alloc<Block>(std::vector<StmtPtr>({block2}));
+    BlockPtr enclosing = Block::make({block2});
     StmtPtr simplified = IRSimplifier::simplify(enclosing);
 
     IS_NODE_WITH_NAME(Block, simplified, block);
@@ -4006,10 +4004,10 @@ TEST(Simplify, SimplifyFlattenBlock) {
     StorePtr store1 = Store::make(a, {0}, 1);
     StorePtr store2 = Store::make(a, {0}, 0);
 
-    BlockPtr block1 = alloc<Block>(std::vector<StmtPtr>({store1}));
-    BlockPtr block2 = alloc<Block>(std::vector<StmtPtr>({store2}));
+    BlockPtr block1 = Block::make({store1});
+    BlockPtr block2 = Block::make({store2});
 
-    BlockPtr enclosing = alloc<Block>(std::vector<StmtPtr>({block1, block2}));
+    BlockPtr enclosing = Block::make({block1, block2});
     StmtPtr simplified = IRSimplifier::simplify(enclosing);
 
     IS_NODE_WITH_NAME(Block, simplified, block);
@@ -4029,10 +4027,10 @@ TEST(Simplify, SimplifyFlattenBlock) {
     StorePtr store1 = Store::make(a, {0}, 1);
     StorePtr store2 = Store::make(a, {0}, 0);
 
-    BlockPtr block1 = alloc<Block>(std::vector<StmtPtr>({store2}));
-    BlockPtr block2 = alloc<Block>(std::vector<StmtPtr>({block1}));
+    BlockPtr block1 = Block::make({store2});
+    BlockPtr block2 = Block::make({block1});
 
-    BlockPtr enclosing = alloc<Block>(std::vector<StmtPtr>({store1, block2}));
+    BlockPtr enclosing = Block::make({store1, block2});
     StmtPtr simplified = IRSimplifier::simplify(enclosing);
 
     IS_NODE_WITH_NAME(Block, simplified, block);
@@ -4047,9 +4045,9 @@ TEST(Simplify, SimplifyFlattenBlock) {
 
   {
     // Flatten many layers around an empty block to an empty block.
-    StmtPtr last = alloc<Block>(std::vector<StmtPtr>({}));
+    StmtPtr last = Block::make({});
     for (int i = 0; i < 11; ++i) {
-      last = alloc<Block>(std::vector<StmtPtr>({last}));
+      last = Block::make({last});
     }
 
     StmtPtr simplified = IRSimplifier::simplify(last);
@@ -4068,7 +4066,7 @@ TEST(Simplify, SimplifyEliminateZeroLengthAlloc) {
     AllocatePtr alloc_ = Allocate::make(b);
     FreePtr free_ = Free::make(b);
 
-    BlockPtr block1 = alloc<Block>(std::vector<StmtPtr>({alloc_, free_}));
+    BlockPtr block1 = Block::make({alloc_, free_});
     ASSERT_EQ(block1->nstmts(), 2);
 
     StmtPtr simplified = IRSimplifier::simplify(block1);
@@ -4083,7 +4081,7 @@ TEST(Simplify, SimplifyEliminateZeroLengthAlloc) {
     AllocatePtr alloc_ = Allocate::make(b);
     FreePtr free_ = Free::make(b);
 
-    BlockPtr block1 = alloc<Block>(std::vector<StmtPtr>({alloc_, free_}));
+    BlockPtr block1 = Block::make({alloc_, free_});
     ASSERT_EQ(block1->nstmts(), 2);
 
     StmtPtr simplified = IRSimplifier::simplify(block1);
@@ -4101,8 +4099,7 @@ TEST(Simplify, SimplifyEliminateZeroLengthAlloc) {
     FreePtr free2_ = Free::make(b2);
     FreePtr free1_ = Free::make(b1);
 
-    BlockPtr block1 =
-        alloc<Block>(std::vector<StmtPtr>({alloc1, alloc2, free2_, free1_}));
+    BlockPtr block1 = Block::make({alloc1, alloc2, free2_, free1_});
     ASSERT_EQ(block1->nstmts(), 4);
 
     StmtPtr simplified = IRSimplifier::simplify(block1);
@@ -4125,8 +4122,7 @@ TEST(Simplify, SimplifyEliminateZeroLengthAlloc) {
     FreePtr free2_ = Free::make(b2);
     FreePtr free1_ = Free::make(b1);
 
-    BlockPtr block1 =
-        alloc<Block>(std::vector<StmtPtr>({alloc1, alloc2, free2_, free1_}));
+    BlockPtr block1 = Block::make({alloc1, alloc2, free2_, free1_});
     ASSERT_EQ(block1->nstmts(), 4);
     StmtPtr simplified = IRSimplifier::simplify(block1);
     IS_NODE_WITH_NAME(Block, simplified, block2);

@@ -574,7 +574,7 @@ TEST(LoopNest, ExprSplitWithTailNone) {
     BufHandle f("f", {24, 5}, kFloat);
     ExprHandle x_1 = x_outer * 4 + x_inner;
     ExprHandle x_outer_end = (ExprHandle(24) - 0) / 4;
-    StmtPtr stmt = alloc<Block>(std::vector<StmtPtr>({For::make(
+    StmtPtr stmt = Block::make({For::make(
         x_outer,
         0,
         x_outer_end,
@@ -582,7 +582,7 @@ TEST(LoopNest, ExprSplitWithTailNone) {
             x_inner,
             0,
             4,
-            For::make(y, 0, 5, Store::make(f, {x_1, y}, func(x_1, y)))))}));
+            For::make(y, 0, 5, Store::make(f, {x_1, y}, func(x_1, y)))))});
 
     std::ostringstream oss_ref;
     oss_ref << *stmt;
@@ -2983,7 +2983,7 @@ TEST(LoopNest, UnrollMultipleStatements) {
       Block::make(
           {Store::make(a_buf, {x}, x * 2),
            Store::make(b_buf, {x}, Load::make(a_buf, {x}))}));
-  Block::make({f});
+  auto parent_block = Block::make({f});
   StmtPtr unrolled = nullptr;
   LoopNest::unroll(f, &unrolled);
   checkIR(unrolled, R"IR(
@@ -3069,7 +3069,7 @@ TEST(LoopNest, UnrollWithLet) {
           {Let::make(e, 7),
            Store::make(a_buf, {x}, e),
            Store::make(b_buf, {x}, e + 1)}));
-  Block::make({f});
+  auto parent_block = Block::make({f});
   StmtPtr unrolled = nullptr;
   LoopNest::unroll(f, &unrolled);
   std::ostringstream oss;

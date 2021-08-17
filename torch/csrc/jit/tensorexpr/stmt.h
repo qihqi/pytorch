@@ -14,14 +14,14 @@ namespace tensorexpr {
 class Placeholder;
 
 // The common base between all statement node.
-class TORCH_API Stmt : public KernelScopedObject {
+class TORCH_API Stmt : public std::enable_shared_from_this<Stmt> {
  public:
   Stmt() = default;
   virtual void accept(IRVisitor* visitor) = 0;
   virtual StmtPtr accept_mutator(IRMutator* mutator) = 0;
 
   StmtPtr get_parent() const {
-    return parent_;
+    return parent_ ? parent_->getptr() : nullptr;
   }
 
   /*
@@ -34,12 +34,24 @@ class TORCH_API Stmt : public KernelScopedObject {
   static StmtPtr clone(StmtPtr s);
 
  protected:
-  static void set_parent(StmtPtr s, StmtPtr new_parent) {
+  static void set_parent(StmtPtr s, Stmt* new_parent) {
+    TORCH_INTERNAL_ASSERT(!s->parent_ || !new_parent);
     s->parent_ = new_parent;
+  }
+  //   template <typename Derived>
+  //   std::shared_ptr<Derived> shared_from_base()
+  //   {
+  //         return std::static_pointer_cast<Derived>(shared_from_this());
+  //   }
+  std::shared_ptr<Stmt> getptr() {
+    return shared_from_this();
+  }
+  Stmt* getweakptr() {
+    return this;
   }
 
  private:
-  StmtPtr parent_ = nullptr;
+  Stmt* parent_ = nullptr;
 };
 
 template <class Op>
@@ -47,7 +59,8 @@ class StmtNode : public Stmt {
  public:
   using StmtNodeBase = StmtNode<Op>;
   void accept(IRVisitor* visitor) override {
-    visitor->visit(static_to<Op>(this));
+    auto op_ptr = std::static_pointer_cast<Op>(getptr());
+    visitor->visit(op_ptr);
   }
   StmtPtr accept_mutator(IRMutator* mutator) override;
   StmtNode() = default;
@@ -55,25 +68,22 @@ class StmtNode : public Stmt {
 
 template <class Op>
 StmtPtr StmtNode<Op>::accept_mutator(IRMutator* mutator) {
-  return mutator->mutate(static_to<Op>(this));
+  auto op_ptr = std::static_pointer_cast<Op>(getptr());
+  return mutator->mutate(op_ptr);
 }
 
 // Concrete Stmt classes
 class TORCH_API Block : public StmtNode<Block> {
  public:
   static BlockPtr make(const std::vector<StmtPtr>& stmts) {
-    // NOLINTNEXTLINE(cppcoreguidelines-init-variables)
-    std::vector<StmtPtr> valid_stmts;
+    auto b = alloc<Block>();
     for (auto& stmt : stmts) {
       if (!stmt) {
         continue;
       }
-      valid_stmts.push_back(stmt);
+      b->append_stmt(stmt);
     }
-    if (valid_stmts.empty()) {
-      return nullptr;
-    }
-    return alloc<Block>(valid_stmts);
+    return b;
   }
 
   int nstmts() const {
@@ -89,7 +99,7 @@ class TORCH_API Block : public StmtNode<Block> {
     }
 
     stmts_.push_front(s);
-    set_parent(s, this);
+    set_parent(s, getweakptr());
   }
   void append_stmt(StmtPtr s) {
     if (s->get_parent()) {
@@ -97,7 +107,7 @@ class TORCH_API Block : public StmtNode<Block> {
     }
 
     stmts_.push_back(s);
-    set_parent(s, this);
+    set_parent(s, getweakptr());
   }
 
   void insert_stmt_before(StmtPtr s, StmtPtr before) {
@@ -112,7 +122,7 @@ class TORCH_API Block : public StmtNode<Block> {
     }
 
     stmts_.insert(pos, s);
-    set_parent(s, this);
+    set_parent(s, getweakptr());
   }
 
   void insert_stmt_after(StmtPtr s, StmtPtr after) {
@@ -129,7 +139,7 @@ class TORCH_API Block : public StmtNode<Block> {
     ++pos;
 
     stmts_.insert(pos, s);
-    set_parent(s, this);
+    set_parent(s, getweakptr());
   }
 
   bool replace_stmt(StmtPtr old_stmt, StmtPtr new_stmt) {
@@ -145,7 +155,7 @@ class TORCH_API Block : public StmtNode<Block> {
     stmts_.insert(pos, new_stmt);
     stmts_.erase(pos);
     set_parent(old_stmt, nullptr);
-    set_parent(new_stmt, this);
+    set_parent(new_stmt, getweakptr());
     return true;
   }
 
@@ -174,7 +184,7 @@ class TORCH_API Block : public StmtNode<Block> {
     if (!found) {
       return nullptr;
     }
-    return alloc<Block>(cloned_stmts);
+    return Block::make(cloned_stmts);
   }
 
   bool remove_stmt(StmtPtr stmt) {
@@ -193,7 +203,7 @@ class TORCH_API Block : public StmtNode<Block> {
   }
 
   void clear() {
-    for (auto* s : stmts_) {
+    for (const auto& s : stmts_) {
       set_parent(s, nullptr);
     }
     stmts_.clear();
@@ -208,6 +218,7 @@ class TORCH_API Block : public StmtNode<Block> {
   explicit Block(const std::vector<StmtPtr>& stmts) {
     init(stmts);
   }
+  Block() = default;
 
   typedef std::list<StmtPtr>::iterator iterator;
   typedef std::list<StmtPtr>::const_iterator const_iterator;
@@ -246,7 +257,8 @@ class TORCH_API Block : public StmtNode<Block> {
 
   void splice(Block::iterator it, BlockPtr other) {
     for (StmtPtr s : *other) {
-      set_parent(s, this);
+      set_parent(s, nullptr);
+      set_parent(s, getweakptr());
     }
 
     stmts_.splice(it, other->stmts_);
@@ -281,7 +293,7 @@ class TORCH_API Block : public StmtNode<Block> {
 
   // returns the immediate child containing statement s.
   StmtPtr getEnclosedRoot(StmtPtr s) const {
-    while (s && s->get_parent() != this) {
+    while (s && s->get_parent().get() != this) {
       s = s->get_parent();
     }
     return s;
@@ -341,6 +353,10 @@ class TORCH_API Store : public StmtNode<Store> {
       const BufHandle& buf,
       const std::vector<ExprHandle>& indices,
       const ExprHandle& value);
+  static StorePtr make(
+      BufPtr buf,
+      const std::vector<ExprPtr>& indices,
+      ExprPtr value);
 
   Store(BufPtr buf, std::vector<ExprPtr> indices, ExprPtr value);
 
@@ -448,10 +464,34 @@ class TORCH_API Let : public StmtNode<Let> {
 class TORCH_API Cond : public StmtNode<Cond> {
  public:
   static CondPtr make(
+      ExprPtr condition,
+      StmtPtr true_stmt,
+      StmtPtr false_stmt) {
+    auto c = alloc<Cond>();
+    c->condition_ = condition;
+    if (true_stmt) {
+      BlockPtr b = to<Block>(true_stmt);
+      if (!b) {
+        b = Block::make({true_stmt});
+      }
+      c->true_stmt_ = b;
+      set_parent(c->true_stmt_, c->getweakptr());
+    }
+    if (false_stmt) {
+      BlockPtr b = to<Block>(false_stmt);
+      if (!b) {
+        b = Block::make({false_stmt});
+      }
+      c->false_stmt_ = b;
+      set_parent(c->false_stmt_, c->getweakptr());
+    }
+    return c;
+  }
+  static CondPtr make(
       const ExprHandle& condition,
       StmtPtr true_stmt,
       StmtPtr false_stmt) {
-    return alloc<Cond>(condition.node(), true_stmt, false_stmt);
+    return make(condition.node(), true_stmt, false_stmt);
   }
 
   ExprPtr condition() const {
@@ -491,6 +531,7 @@ class TORCH_API Cond : public StmtNode<Cond> {
       set_parent(false_stmt_, this);
     }
   }
+  Cond() = default;
 
   Cond(ExprPtr condition, StmtPtr true_stmt, StmtPtr false_stmt)
       : condition_(condition) {
@@ -499,11 +540,11 @@ class TORCH_API Cond : public StmtNode<Cond> {
   }
 
   CondPtr cloneWithNewBodies(StmtPtr true_stmt, StmtPtr false_stmt) {
-    return alloc<Cond>(condition_, true_stmt, false_stmt);
+    return Cond::make(condition_, true_stmt, false_stmt);
   }
 
   CondPtr cloneWithNewBody(StmtPtr true_stmt) {
-    return alloc<Cond>(condition_, true_stmt, nullptr);
+    return Cond::make(condition_, true_stmt, nullptr);
   }
 
  private:
@@ -657,15 +698,28 @@ class TORCH_API For : public StmtNode<For> {
   BlockPtr body() const {
     return body_;
   }
+  static ForPtr make(VarPtr var, ExprPtr start, ExprPtr stop, StmtPtr body) {
+    if (!body) {
+      return nullptr;
+    }
+    if (body->get_parent()) {
+      throw malformed_input("invalid Body in For loop", body);
+    }
+    auto f = alloc<For>(var, start, stop);
+    BlockPtr b = to<Block>(body);
+    if (!b) {
+      b = Block::make({body});
+    }
+    f->body_ = b;
+    set_parent(f->body_, f->getweakptr());
+    return f;
+  }
   static ForPtr make(
       const VarHandle& var,
       const ExprHandle& start,
       const ExprHandle& stop,
       StmtPtr body) {
-    if (!body) {
-      return nullptr;
-    }
-    return alloc<For>(var.node(), start.node(), stop.node(), body);
+    return make(var.node(), start.node(), stop.node(), body);
   }
   static ForPtr make(
       const VarHandle& var,
@@ -673,31 +727,37 @@ class TORCH_API For : public StmtNode<For> {
       const ExprHandle& stop,
       StmtPtr body,
       const LoopOptions& loop_options) {
+    return make(var.node(), start.node(), stop.node(), body, loop_options);
+  }
+  static ForPtr make(
+      VarPtr var,
+      ExprPtr start,
+      ExprPtr stop,
+      StmtPtr body,
+      const LoopOptions& loop_options) {
     if (!body) {
       return nullptr;
     }
-    return alloc<For>(
-        var.node(), start.node(), stop.node(), body, loop_options);
+    if (body->get_parent()) {
+      throw malformed_input("invalid Body in For loop", body);
+    }
+    auto f = alloc<For>(var, start, stop, loop_options);
+    BlockPtr b = to<Block>(body);
+    if (!b) {
+      b = Block::make({body});
+    }
+    f->body_ = b;
+    set_parent(f->body_, f->getweakptr());
+    return f;
   }
   const LoopOptions loop_options() const {
     return loop_options_;
   }
 
-  For(VarPtr var, ExprPtr start, ExprPtr stop, StmtPtr body)
-      : var_(var), start_(start), stop_(stop) {
-    BlockPtr b = to<Block>(body);
-    if (!b) {
-      b = alloc<Block>(std::vector<StmtPtr>({body}));
-    }
-    body_ = b;
-    set_parent(body_, this);
-  }
+  For(VarPtr var, ExprPtr start, ExprPtr stop)
+      : var_(var), start_(start), stop_(stop) {}
 
-  For(VarPtr var,
-      ExprPtr start,
-      ExprPtr stop,
-      StmtPtr body,
-      LoopOptions loop_options)
+  For(VarPtr var, ExprPtr start, ExprPtr stop, LoopOptions loop_options)
       : var_(var),
         start_(start),
         stop_(stop),
@@ -708,16 +768,7 @@ class TORCH_API For : public StmtNode<For> {
       throw malformed_input("invalid Start in For loop", start);
     } else if (!stop) {
       throw malformed_input("invalid Stop in For loop", stop);
-    } else if (!body || body->get_parent()) {
-      throw malformed_input("invalid Body in For loop", body);
     }
-
-    BlockPtr b = to<Block>(body);
-    if (!b) {
-      b = alloc<Block>(std::vector<StmtPtr>({body}));
-    }
-    body_ = b;
-    set_parent(body_, this);
   }
 
   void set_gpu_block_index(int block_index) {
@@ -741,7 +792,7 @@ class TORCH_API For : public StmtNode<For> {
   }
 
   ForPtr cloneWithNewBody(StmtPtr body) const {
-    return alloc<For>(var_, start_, stop_, body, loop_options_);
+    return For::make(var_, start_, stop_, body, loop_options_);
   }
 
   BlockPtr removeBody() {
@@ -754,10 +805,10 @@ class TORCH_API For : public StmtNode<For> {
   void set_body(StmtPtr body) {
     BlockPtr b = to<Block>(body);
     if (!b) {
-      b = alloc<Block>(std::vector<StmtPtr>({body}));
+      b = Block::make({body});
     }
     body_ = b;
-    set_parent(body_, this);
+    set_parent(body_, getweakptr());
   }
 
   void set_start(ExprPtr start) {
