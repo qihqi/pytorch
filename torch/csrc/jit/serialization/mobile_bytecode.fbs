@@ -73,7 +73,7 @@ table ObjectType {
 table Object {
   type_index: int;
   use_setstate:bool;
-  state: IValue;  
+  state: IValue;
 }
 
 struct Instruction {
@@ -117,6 +117,10 @@ table Function {
   debug_info:DebugInfo;
 }
 
+table StorageData {
+  data: [byte];
+}
+
 table Module {
   methods:[Function];
 
@@ -125,7 +129,7 @@ table Module {
   // this is module._ivalue()
   state_obj: Object;
 
-  storage_count: int;
+  storage_data: [StorageData];
 }
 
 root_type Module;

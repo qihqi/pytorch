@@ -510,7 +510,7 @@ void moduleMethodsTuple(
 std::tuple<
     std::vector<c10::OperatorName>,
     std::vector<std::string>,
-    std::vector<int64_t>> 
+    std::vector<int64_t>>
 convertInstructionsForMobile(
   const MobileCode* code,
   std::vector<Instruction>* instructions,
@@ -637,7 +637,7 @@ functionToFlatbuffers(
     if (it != op_to_specified_args.end()) {
       num_args = it->second;
     }
-    CreateAndAppendOperator(fbb, opname.name, opname.overload_name, 
+    CreateAndAppendOperator(fbb, opname.name, opname.overload_name,
         num_args, &operator_vector);
   }
 
@@ -705,7 +705,7 @@ functionToFlatbuffers(
   return function_offset;
 }
 
-flatbuffers::DetachedBuffer 
+flatbuffers::DetachedBuffer
 moduleToFlatbuffers(
     const Module& module,
     std::vector<c10::IValue>& debug_info_elements,
@@ -744,8 +744,19 @@ moduleToFlatbuffers(
       CreateObjectTypeDirect(fbb, classptr->name()->qualifiedName().c_str(), &attr_names));
   }
   auto obj_types_offset = fbb.CreateVector(obj_types);
-  auto mod = CreateModule(fbb, functions_offset, obj_types_offset, ivalue_offset, 
-    serializer->tensor_data_.size());
+
+  int i = 0;
+  std::vector<flatbuffers::Offset<mobile::serialization::StorageData>> storage_data;
+  for (const auto& td : serializer->tensor_data_) {
+    WriteableTensorData writable_td = getWriteableTensorData(td);
+    auto storage_offset = mobile::serialization::CreateStorageData(
+      fbb, fbb.CreateVector(reinterpret_cast<const int8_t*>(writable_td.data()), writable_td.sizeInBytes()));
+    storage_data.push_back(storage_offset);
+  }
+
+
+  auto mod = CreateModule(fbb, functions_offset, obj_types_offset, ivalue_offset,
+    fbb.CreateVector(storage_data));
   fbb.Finish(mod);
   return fbb.Release();
 }
@@ -966,27 +977,10 @@ void ScriptModuleSerializer::writeByteCode(
         debug_info_recorder,
         type_name_uniquer_,
         &serializer);
-    writer_.writeRecord(
-        "bytecodes.flatbuffers",
-        buffer.data(),
-        buffer.size(),
-        buffer.size() > kMinToCompress /*compress*/);
 
-    std::cerr << "HERE: " << "num of tensors: " << serializer.memoized_storage_map_.size() << std::endl;
-
-    const std::string tensor_dir = "tensors_new/";
-
-    int i = 0;
-    for (const auto& td : serializer.tensor_data_) {
-      std::stringstream ss;
-      ss << tensor_dir << i;
-      WriteableTensorData writable_td = getWriteableTensorData(td);
-      writer_.writeRecord(
-          ss.str(),
-          writable_td.data(),
-          writable_td.sizeInBytes());
-      i++;
-    }
+    std::fstream outfile( writer_.archiveName() + ".ff", std::ios::out | std::ios::binary);
+    outfile.write((char*)buffer.data(), buffer.size());
+    outfile.close();
   } else {
       writeArchive(
       module._ivalue(),

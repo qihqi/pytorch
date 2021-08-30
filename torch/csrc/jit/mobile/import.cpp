@@ -1,3 +1,10 @@
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <cstdlib>
+#include <cstring>
+#include <unistd.h>
+#include <fcntl.h>
+
 #include <algorithm>
 #include <torch/csrc/jit/mobile/import.h>
 
@@ -5,6 +12,7 @@
 #include <c10/util/ScopeExit.h>
 #include <c10/util/irange.h>
 #include <caffe2/serialize/inline_container.h>
+#include <caffe2/utils/string_utils.h>
 #include <torch/csrc/jit/api/compilation_unit.h>
 #include <torch/csrc/jit/mobile/interpreter.h>
 #include <torch/csrc/jit/mobile/observer.h>
@@ -215,6 +223,12 @@ void print_unsupported_ops_and_throw(
 // The deserializer class which loads the bytecode package from bc files.
 class BytecodeDeserializer final {
  public:
+ explicit BytecodeDeserializer(
+   const std::string& filename, uint64_t module_load_options = 0)
+    : compilation_unit_(std::make_shared<CompilationUnit>()),
+      filename_(filename),
+      module_load_options_(module_load_options) {}
+
   explicit BytecodeDeserializer(
       std::unique_ptr<PyTorchStreamReader> reader,
       uint64_t module_load_options = 0);
@@ -256,6 +270,7 @@ class BytecodeDeserializer final {
   std::unique_ptr<PyTorchStreamReader> reader_{};
   c10::optional<at::Device> device_;
   uint64_t module_load_options_;
+  std::string filename_;
 };
 
 BytecodeDeserializer::BytecodeDeserializer(
@@ -494,33 +509,16 @@ void BytecodeDeserializer::parseMethods(
 std::vector<c10::Storage> readStorage(PyTorchStreamReader* reader, int storage_count) {
   std::vector<c10::Storage> storages;
   storages.resize(storage_count);
-  std::vector<std::thread> threads;
-  auto read_one_storage = [&](int start, int end) {
-    for (int j = start; j < end; j++) {
-      std::stringstream ss;
-      ss << "tensors_new/" << j;
-      at::DataPtr data;
-      size_t size;
-      std::tie(data, size) = reader->getRecord(ss.str());
-      storages[j] = c10::Storage(
-          c10::Storage::use_byte_size_t(),
-          size, 
-          std::move(data));
-    }
-  };
-  int start = 0;
-  int step = storage_count / 10 + 1;
-  int end;
-  for (int i = 0; i < 10; i++) {
-    end = start + step;
-    if (end > storage_count) {
-      end = storage_count;
-    }
-    threads.emplace_back(read_one_storage, start, end);
-    start = end;
-  }
-  for (int i = 0; i < 10; i++) {
-    threads[i].join();
+  for (int j = 0; j < storage_count; j++) {
+    std::stringstream ss;
+    ss << "tensors_new/" << j;
+    at::DataPtr data;
+    size_t size;
+    std::tie(data, size) = reader->getRecord(ss.str());
+    storages[j] = c10::Storage(
+        c10::Storage::use_byte_size_t(),
+        size,
+        std::move(data));
   }
   return storages;
 }
@@ -549,7 +547,7 @@ void parseMethodsFlatbuffer(
       j += 1;
     }
 
-    
+
     // insert operators
     std::unordered_set<std::string> unsupported_op_names;
     const int64_t model_version = 0x3L;
@@ -675,8 +673,57 @@ mobile::Module BytecodeDeserializer::deserialize(
   return deserialize(device);
 }
 
+
+
+mobile::Module parseFlatbufferDirect(const std::string& filename,
+    std::shared_ptr<mobile::CompilationUnit> mcu,
+    std::shared_ptr<CompilationUnit> cu) {
+
+    // read file completely
+
+    int fd = open(filename.c_str(), O_RDONLY);
+    struct stat statbuf;
+    int err = fstat(fd, &statbuf);
+    void* ptr = mmap(nullptr, statbuf.st_size, PROT_READ, MAP_SHARED, fd, 0);
+
+    const auto* module_ptr = mobile::serialization::GetModule(ptr);
+
+
+
+  std::vector<c10::Storage> storages(module_ptr->storage_data()->size());
+  int j = 0;
+  auto start = std::chrono::system_clock::now();
+  for (auto* storage : *module_ptr->storage_data() ) {
+    size_t size = storage->data()->size();
+    at::DataPtr data(const_cast<void*>(reinterpret_cast<const void*>(storage->data()->data())), nullptr, nullptr, DeviceType::CPU);
+    storages[j] = c10::Storage(
+        c10::Storage::use_byte_size_t(),
+        size,
+        std::move(data));
+    j++;
+  }
+  auto end = std::chrono::system_clock::now();
+  auto diff = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+  std::cout << " parse storage " << diff.count() << "us\n";
+
+  auto m = parseModuleFlatbuffer(
+      module_ptr,
+      storages,
+      mcu,
+      cu);
+
+
+    close(fd);
+    munmap(ptr, statbuf.st_size);
+
+    return m;
+
+}
+
 mobile::Module BytecodeDeserializer::deserialize(
     c10::optional<at::Device> device) {
+
+
   auto start = std::chrono::system_clock::now();
   auto end = std::chrono::system_clock::now();
   std::chrono::microseconds diff;
@@ -699,6 +746,12 @@ mobile::Module BytecodeDeserializer::deserialize(
   // being a Tuple (int, table), and the integer stands for the bytecode version
   // number. The rest of the elements are the same as before.
   //
+
+  if (filename_.size()) {
+    return parseFlatbufferDirect(filename_,
+            mcu,
+            compilation_unit_);
+  }
 
   start = std::chrono::system_clock::now();
   c10::optional<std::vector<IValue>> debug_handles;
@@ -729,7 +782,7 @@ mobile::Module BytecodeDeserializer::deserialize(
       return objLoaderMobile(type, input, mcu);
     };
 
-    std::vector<c10::Storage> storages = readStorage(reader_.get(), module_ptr->storage_count());
+    std::vector<c10::Storage> storages = readStorage(reader_.get(), 100);
     end = std::chrono::system_clock::now();
     diff = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
     std::cout << "    [NEW] Load storages" << diff.count() << "us\n";
@@ -811,7 +864,8 @@ mobile::Module _load_for_mobile_impl(
     std::unique_ptr<ReadAdapterInterface> rai,
     c10::optional<c10::Device> device,
     ExtraFilesMap& extra_files,
-    uint64_t module_load_options);
+    uint64_t module_load_options,
+    std::string filename = "");
 
 mobile::Module _load_for_mobile(
     std::istream& in,
@@ -848,7 +902,7 @@ mobile::Module _load_for_mobile(
     c10::optional<at::Device> device,
     ExtraFilesMap& extra_files) {
   std::unique_ptr<FileAdapter> rai = std::make_unique<FileAdapter>(filename);
-  auto module = _load_for_mobile(std::move(rai), device, extra_files);
+  auto module = _load_for_mobile(filename, device, extra_files, 0);
   return module;
 }
 
@@ -859,7 +913,7 @@ mobile::Module _load_for_mobile(
     uint64_t module_load_options) {
   std::unique_ptr<FileAdapter> rai = std::make_unique<FileAdapter>(filename);
   auto module = _load_for_mobile_impl(
-      std::move(rai), device, extra_files, module_load_options);
+      std::move(rai), device, extra_files, module_load_options, filename);
   return module;
 }
 
@@ -876,7 +930,8 @@ mobile::Module _load_for_mobile_impl(
     std::unique_ptr<ReadAdapterInterface> rai,
     c10::optional<c10::Device> device,
     ExtraFilesMap& extra_files,
-    uint64_t module_load_options) {
+    uint64_t module_load_options,
+    std::string filename) {
   auto observer = torch::observerConfig().getModuleObserver();
   // NOLINTNEXTLINE(clang-analyzer-security.insecureAPI.rand)
   auto instance_key = std::rand();
@@ -892,15 +947,20 @@ mobile::Module _load_for_mobile_impl(
   }
 
   const size_t model_size = rai != nullptr ? rai->size() : 0;
-  auto reader = torch::make_unique<PyTorchStreamReader>(std::move(rai));
-  BytecodeDeserializer deserializer(std::move(reader), module_load_options);
+  std::unique_ptr<BytecodeDeserializer> deserializer;
+  if (filename.size() && caffe2::EndsWith(filename, ".ff")) {
+    deserializer = std::make_unique<BytecodeDeserializer>(filename);
+  } else {
+    auto reader = torch::make_unique<PyTorchStreamReader>(std::move(rai));
+    deserializer = std::make_unique<BytecodeDeserializer>(std::move(reader), module_load_options);
+  }
 
   std::string error_message;
   auto guard = c10::make_scope_exit([&]() {
     if (!observer) {
       return;
     }
-    deserializer.deserialize_only_extra(device, extra_files);
+    deserializer->deserialize_only_extra(device, extra_files);
 
     metadata_map = observer->processMetadataFromExtra(extra_files);
 
@@ -911,7 +971,7 @@ mobile::Module _load_for_mobile_impl(
   });
 
   try {
-    mobile::Module result = deserializer.deserialize(device, extra_files);
+    mobile::Module result = deserializer->deserialize(device, extra_files);
     if (observer) {
       // Add model_name and model_size to metadata_map
       extra_files.insert(std::make_pair("model_name", result.name()));
