@@ -7,6 +7,7 @@ from torch._functorch.aot_autograd import FQN, GraphInputName, GraphOutputName
 
 import torch
 from torch.fx.passes.infra.pass_manager import PassManager
+# 2 pytrees?
 import torch.fx._pytree as fx_pytree
 import torch.utils._pytree as pytree
 from torch.fx.experimental.symbolic_shapes import SymInt
@@ -59,14 +60,20 @@ class ExportBackwardSignature:
 
 @dataclasses.dataclass
 class ExportGraphSignature:
+    # Order is the order given to .graph_module field in ExportedProgram?
     parameters: List[FQN]
+    # Order is the order given to .graph_module field in ExportedProgram?
     buffers: List[FQN]
 
-    user_inputs: List[GraphInputName]
-    user_outputs: List[GraphOutputName]
+    # only order is used to give to .graph_module i.e. not kwargs?
+    # is this input to graph module or original input
+    user_inputs: List[GraphInputName]  # str
+    user_outputs: List[GraphOutputName]  # str
+
     inputs_to_parameters: Dict[GraphInputName, FQN]
     inputs_to_buffers: Dict[GraphInputName, FQN]
 
+    # what model triggers this?
     buffers_to_mutate: Dict[GraphOutputName, FQN]
 
     backward_signature: Optional[ExportBackwardSignature]
@@ -100,15 +107,26 @@ class ExportedProgram:
     ):
         # Remove codegen related things from the graph. It should just be a flat graph.
         graph._codegen = torch.fx.graph.CodeGen()
+
+        # NOTE: typically self.graph_module is one that doesn't have parameters
+        # parameters has been lifted to be inputs
+        # i.e. self.graph_module.state_dict() == {}
         self.graph_module = torch.fx.GraphModule(root, graph)
 
         self.graph_signature: ExportGraphSignature = graph_signature
+
+        # there are 2 pytrees, which one to use for this spec.
         self.call_spec: CallSpec = call_spec
+
+        # This is state_dict of the original module?
+        # is this ordered?
         self.state_dict: Dict[str, Any] = state_dict
         self.range_constraints: Dict[sympy.Symbol, RangeConstraint] = range_constraints
         self.equality_constraints: List[Tuple[InputDim, InputDim]] = equality_constraints
 
     def __call__(self, *args: Any) -> Any:
+        # here len(args) == len(self.graph_signature.user_inputs)?
+        # OR len(args) + len(state_dict) == len(self.graph_signature.user_inputs)?
         if self.call_spec.in_spec is not None:
             try:
                 args = fx_pytree.tree_flatten_spec(args, self.call_spec.in_spec)  # type: ignore[assignment]
